@@ -19,6 +19,7 @@ const PROXY_CONFIG = {
   "/portkey": "https://api.portkey.ai",
   "/fireworks": "https://api.fireworks.ai",
   "/openrouter": "https://openrouter.ai/api",
+  "/minimax": "https://api.minimaxi.com",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
