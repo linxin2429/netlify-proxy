@@ -21,6 +21,7 @@ const PROXY_CONFIG = {
   "/openrouter": "https://openrouter.ai/api",
   "/minimax": "https://api.minimaxi.com",
   "/minimax_a": "https://api.minimaxi.com/anthropic",
+  "/aiping": "https://aiping.cn/api",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
