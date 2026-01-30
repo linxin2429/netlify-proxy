@@ -29,7 +29,8 @@ const PROXY_CONFIG = {
   "/kuma": "https://kuma.gally.dpdns.org",
   "/hf": "https://huggingface.co",
   "/tv": "https://tv.gally.ddns-ip.net",
-  "/news": "https://newsnow-ahm.pages.dev"
+  "/news": "https://newsnow-ahm.pages.dev",
+  "/github": "https://github.com",
 };
 
 // 需要修复路径的内容类型
