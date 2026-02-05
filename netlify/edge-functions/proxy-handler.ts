@@ -23,6 +23,7 @@ const PROXY_CONFIG = {
   "/minimax_a": "https://api.minimaxi.com/anthropic",
   "/aiping": "https://aiping.cn/api",
   "/kimi": "https://api.kimi.com/coding/v1",
+  "/kimi_a": "https://api.kimi.com/coding",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
