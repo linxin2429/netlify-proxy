@@ -24,6 +24,7 @@ const PROXY_CONFIG = {
   "/aiping": "https://aiping.cn/api",
   "/kimi": "https://api.kimi.com/coding/v1",
   "/kimi_a": "https://api.kimi.com/coding",
+  "/coyes": "https://co.yes.vg"
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
