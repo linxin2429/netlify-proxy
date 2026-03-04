@@ -27,6 +27,7 @@ const PROXY_CONFIG = {
   "/coyes": "https://co.yes.vg",
   "/claudecn": "https://claudecn.top",
   "/githubdev": "https://github.dev",
+  "/right": "https://right.codes",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
