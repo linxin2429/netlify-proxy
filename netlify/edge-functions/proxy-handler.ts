@@ -29,6 +29,7 @@ const PROXY_CONFIG = {
   "/githubdev": "https://github.dev",
   "/right": "https://right.codes",
   "/sub2api": "https://sub2api.luyu1204.fun:23334",
+  "/timicc": "https://timicc.com",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app", 
   "/hexo2": "https://hexo-987.pages.dev",
