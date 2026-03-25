@@ -30,6 +30,7 @@ const PROXY_CONFIG = {
   "/right": "https://right.codes",
   "/sub2api": "https://sub2api.luyu1204.fun:23334",
   "/timicc": "https://timicc.com",
+  "/hongmacc": "https://hongmacc.com/api",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app",
   "/hexo2": "https://hexo-987.pages.dev",
