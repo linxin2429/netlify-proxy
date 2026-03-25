@@ -32,6 +32,7 @@ const PROXY_CONFIG = {
   "/timicc": "https://timicc.com",
   "/hongmacc": "https://hongmacc.com/api",
   "/openclaudecode": "https://www.openclaudecode.cn",
+  "/yu": "http://101.43.9.6:3000",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app",
   "/hexo2": "https://hexo-987.pages.dev",
