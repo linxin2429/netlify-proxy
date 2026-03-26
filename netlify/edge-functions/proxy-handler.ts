@@ -28,7 +28,7 @@ const PROXY_CONFIG = {
   "/claudecn": "https://claudecn.top",
   "/githubdev": "https://github.dev",
   "/right": "https://right.codes",
-  "/sub2api": "https://sub2api.luyu1204.fun:23334",
+  "/sub2api": "http://67.216.198.55:8080",
   "/timicc": "https://timicc.com",
   "/hongmacc": "https://hongmacc.com/api",
   "/openclaudecode": "https://www.openclaudecode.cn",
