@@ -34,6 +34,7 @@ const PROXY_CONFIG = {
   "/openclaudecode": "https://www.openclaudecode.cn",
   "/yu": "http://101.43.9.6:3000",
   "/aixj": "https://aixj.vip",
+  "/ai-all": "https://ai-all.online",
   // 任意网址
   "/hexo": "https://hexo-gally.vercel.app",
   "/hexo2": "https://hexo-987.pages.dev",
