@@ -91,6 +91,7 @@ const JS_CONTENT_TYPES = [
 ];
 
 const EVENT_STREAM_CONTENT_TYPE = 'text/event-stream';
+const STREAM_HEARTBEAT_INTERVAL_MS = 15000;
 const HOP_BY_HOP_REQUEST_HEADERS = [
   'connection',
   'host',
@@ -114,6 +115,17 @@ function isStreamingRequest(request: Request): boolean {
 function isStreamingResponse(response: Response): boolean {
   const contentType = response.headers.get('content-type') || '';
   return contentType.toLowerCase().includes(EVENT_STREAM_CONTENT_TYPE);
+}
+
+function encodeSseErrorEvent(errorPayload: Record<string, unknown>): Uint8Array {
+  const encoder = new TextEncoder();
+  const payload = JSON.stringify(errorPayload);
+  return encoder.encode(`event: error\ndata: ${payload}\n\n`);
+}
+
+function shortRequestId(): string {
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return `${Date.now().toString(36)}-${randomPart}`;
 }
 
 // 特定网站的替换规则 (针对某些站点的特殊处理)
@@ -202,8 +214,15 @@ const SPECIAL_REPLACEMENTS: Record<string, Array<{ pattern: RegExp, replacement:
 };
 
 export default async (request: Request, context: Context) => {
+  const requestId = shortRequestId();
+  const requestStartAt = Date.now();
+  const log = (message: string) => context.log(`[proxy][${requestId}] +${Date.now() - requestStartAt}ms ${message}`);
+
+  log(`incoming method=${request.method} path=${new URL(request.url).pathname}`);
+
   // 处理 CORS 预检请求 (OPTIONS)
   if (request.method === "OPTIONS") {
+    log("OPTIONS preflight handled");
     return new Response(null, {
       status: 204,
       headers: {
@@ -242,7 +261,7 @@ export default async (request: Request, context: Context) => {
         targetUrl.search = url.search;
       }
 
-      context.log(`Proxying generic request to: ${targetUrl.toString()}`);
+      log(`generic proxy target=${targetUrl.toString()}`);
 
       // 重要：创建一个新的 Request 对象以避免潜在问题
       const proxyRequest = new Request(targetUrl.toString(), {
@@ -280,7 +299,9 @@ export default async (request: Request, context: Context) => {
       }
 
       // 发起代理请求
+      log(`generic upstream fetch start method=${request.method}`);
       const response = await fetch(proxyRequest);
+      log(`generic upstream response status=${response.status} contentType=${response.headers.get('content-type') || ''}`);
 
       // 创建新的响应对象
       let newResponse = new Response(response.body, {
@@ -310,9 +331,10 @@ export default async (request: Request, context: Context) => {
         newResponse.headers.set('Location', newLocation);
       }
 
+      log(`generic response returned status=${newResponse.status}`);
       return newResponse;
     } catch (error) {
-      context.log(`Error proxying generic URL: ${error}`);
+      log(`generic proxy failed error=${error}`);
       return new Response(`代理请求失败: ${error}`, {
         status: 502,
         headers: {
@@ -349,7 +371,7 @@ export default async (request: Request, context: Context) => {
     // 继承原始请求的查询参数
     targetUrl.search = url.search;
 
-    context.log(`Proxying "${path}" to "${targetUrl.toString()}"`);
+    log(`matchedPrefix=${matchedPrefix} aiApi=${isAiApiPrefix(matchedPrefix)} target=${targetUrl.toString()}`);
 
     try {
       const aiApiRequest = isAiApiPrefix(matchedPrefix);
@@ -359,8 +381,11 @@ export default async (request: Request, context: Context) => {
         redirect: 'manual', // 防止 fetch 自动处理重定向
       };
 
-      if (request.method !== 'GET' && request.method !== 'HEAD' && request.body !== null) {
+      const hasRequestBody = request.method !== 'GET' && request.method !== 'HEAD' && request.body !== null;
+      if (hasRequestBody) {
         proxyRequestInit.body = request.body;
+        const contentLength = request.headers.get('content-length') || 'unknown';
+        log(`request has body contentLength=${contentLength}`);
       }
 
       for (const headerName of HOP_BY_HOP_REQUEST_HEADERS) {
@@ -401,12 +426,156 @@ export default async (request: Request, context: Context) => {
       // 重要：创建一个新的 Request 对象以避免潜在问题
       const proxyRequest = new Request(targetUrl.toString(), proxyRequestInit);
 
+      const streamRequested = aiApiRequest && isStreamingRequest(request);
+      log(`stream decision aiApi=${aiApiRequest} accept=${request.headers.get('accept') || ''} streamRequested=${streamRequested}`);
+      if (streamRequested) {
+        const streamStartAt = Date.now();
+        let streamProxyRequest = proxyRequest;
+        if (hasRequestBody) {
+          try {
+            const bufferedBody = await request.clone().arrayBuffer();
+            log(`buffered request body bytes=${bufferedBody.byteLength}`);
+            streamProxyRequest = new Request(targetUrl.toString(), {
+              ...proxyRequestInit,
+              headers: proxyHeaders,
+              body: bufferedBody,
+            });
+          } catch (error) {
+            log(`[stream] failed to buffer request body path=${path} error=${error}`);
+            return new Response("代理请求失败：无法读取请求体", {
+              status: 400,
+              headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'text/plain;charset=UTF-8'
+              }
+            });
+          }
+        }
+
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            const writeChunk = (chunk: Uint8Array) => controller.enqueue(chunk);
+            let heartbeatTimer: number | undefined;
+            let streamClosed = false;
+            let firstUpstreamChunkAt: number | null = null;
+            let heartbeatCount = 0;
+            let upstreamChunkCount = 0;
+            let upstreamBytes = 0;
+
+            const closeStream = () => {
+              if (streamClosed) return;
+              streamClosed = true;
+              if (heartbeatTimer !== undefined) {
+                clearInterval(heartbeatTimer);
+              }
+              controller.close();
+              log(`[stream] closed heartbeatCount=${heartbeatCount} chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
+            };
+
+            const emitSseError = (payload: Record<string, unknown>) => {
+              if (streamClosed) return;
+              writeChunk(encodeSseErrorEvent(payload));
+              closeStream();
+            };
+
+            try {
+              heartbeatTimer = setInterval(() => {
+                if (streamClosed || firstUpstreamChunkAt !== null) return;
+                try {
+                  heartbeatCount += 1;
+                  writeChunk(encoder.encode(': keep-alive\n\n'));
+                  log(`[stream] heartbeat sent count=${heartbeatCount}`);
+                } catch (_err) {
+                  closeStream();
+                }
+              }, STREAM_HEARTBEAT_INTERVAL_MS) as unknown as number;
+
+              const upstreamResponse = await fetch(streamProxyRequest);
+              log(`[stream] upstream headers in ${Date.now() - streamStartAt}ms status=${upstreamResponse.status} contentType=${upstreamResponse.headers.get('content-type') || ''}`);
+
+              if (!upstreamResponse.ok) {
+                const upstreamErrorText = await upstreamResponse.text().catch(() => upstreamResponse.statusText);
+                emitSseError({
+                  source: 'upstream',
+                  status: upstreamResponse.status,
+                  message: upstreamErrorText.slice(0, 800),
+                });
+                return;
+              }
+
+              if (!upstreamResponse.body) {
+                emitSseError({
+                  source: 'proxy',
+                  message: 'upstream response body is empty',
+                });
+                return;
+              }
+
+              const upstreamContentType = (upstreamResponse.headers.get('content-type') || '').toLowerCase();
+              if (!upstreamContentType.includes(EVENT_STREAM_CONTENT_TYPE)) {
+                const preview = await upstreamResponse.text().catch(() => '');
+                emitSseError({
+                  source: 'upstream',
+                  message: 'unexpected content-type for streaming request',
+                  contentType: upstreamContentType || 'unknown',
+                  preview: preview.slice(0, 400),
+                });
+                return;
+              }
+
+              const reader = upstreamResponse.body.getReader();
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value || value.byteLength === 0) continue;
+                upstreamChunkCount += 1;
+                upstreamBytes += value.byteLength;
+
+                if (firstUpstreamChunkAt === null) {
+                  firstUpstreamChunkAt = Date.now();
+                  log(`[stream] first upstream chunk in ${firstUpstreamChunkAt - streamStartAt}ms`);
+                }
+                writeChunk(value);
+                if (upstreamChunkCount % 25 === 0) {
+                  log(`[stream] progress chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
+                }
+              }
+
+              log(`[stream] completed in ${Date.now() - streamStartAt}ms chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
+              closeStream();
+            } catch (error) {
+              log(`[stream] failed path=${path} error=${error}`);
+              emitSseError({
+                source: 'proxy',
+                message: 'streaming failed before completion',
+              });
+            }
+          }
+        });
+
+        log(`[stream] response started in ${Date.now() - streamStartAt}ms path=${path}`);
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Pragma': 'no-cache',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Range',
+          }
+        });
+      }
+
       // 发起代理请求
+      log("non-stream upstream fetch start");
       const response = await fetch(proxyRequest);
 
       // 获取内容类型
       const contentType = response.headers.get('content-type') || '';
-      const streamingResponse = aiApiRequest && (isStreamingRequest(request) || isStreamingResponse(response));
+      const streamingResponse = aiApiRequest && isStreamingResponse(response);
+      log(`non-stream upstream response status=${response.status} contentType=${contentType} upstreamIsStream=${streamingResponse}`);
 
       // 创建新的响应对象，以便我们可以修改头部
       let newResponse: Response;
@@ -771,10 +940,11 @@ export default async (request: Request, context: Context) => {
         }
       }
 
+      log(`response returned status=${newResponse.status} streamingResponse=${streamingResponse}`);
       return newResponse;
 
     } catch (error) {
-      context.log("Error fetching target URL:", error);
+      log(`target fetch failed error=${error}`);
       return new Response("代理请求失败", {
         status: 502,
         headers: {
@@ -786,5 +956,6 @@ export default async (request: Request, context: Context) => {
   }
 
   // 如果没有匹配的代理规则，则不处理此请求，交由 Netlify 的其他规则处理
+  log("no proxy rule matched, passing through");
   return;
-}; 
+};
