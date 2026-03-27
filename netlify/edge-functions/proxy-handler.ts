@@ -91,7 +91,6 @@ const JS_CONTENT_TYPES = [
 ];
 
 const EVENT_STREAM_CONTENT_TYPE = 'text/event-stream';
-const STREAM_HEARTBEAT_INTERVAL_MS = 15000;
 const HOP_BY_HOP_REQUEST_HEADERS = [
   'connection',
   'host',
@@ -115,12 +114,6 @@ function isStreamingRequest(request: Request): boolean {
 function isStreamingResponse(response: Response): boolean {
   const contentType = response.headers.get('content-type') || '';
   return contentType.toLowerCase().includes(EVENT_STREAM_CONTENT_TYPE);
-}
-
-function encodeSseErrorEvent(errorPayload: Record<string, unknown>): Uint8Array {
-  const encoder = new TextEncoder();
-  const payload = JSON.stringify(errorPayload);
-  return encoder.encode(`event: error\ndata: ${payload}\n\n`);
 }
 
 // 特定网站的替换规则 (针对某些站点的特殊处理)
@@ -408,120 +401,12 @@ export default async (request: Request, context: Context) => {
       // 重要：创建一个新的 Request 对象以避免潜在问题
       const proxyRequest = new Request(targetUrl.toString(), proxyRequestInit);
 
-      const streamRequested = aiApiRequest && isStreamingRequest(request);
-      if (streamRequested) {
-        const requestStartAt = Date.now();
-        const stream = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            const encoder = new TextEncoder();
-            const writeChunk = (chunk: Uint8Array) => controller.enqueue(chunk);
-            let heartbeatTimer: number | undefined;
-            let streamClosed = false;
-            let firstUpstreamChunkAt: number | null = null;
-
-            const closeStream = () => {
-              if (streamClosed) return;
-              streamClosed = true;
-              if (heartbeatTimer !== undefined) {
-                clearInterval(heartbeatTimer);
-              }
-              controller.close();
-            };
-
-            const emitSseError = (payload: Record<string, unknown>) => {
-              if (streamClosed) return;
-              writeChunk(encodeSseErrorEvent(payload));
-              closeStream();
-            };
-
-            try {
-              heartbeatTimer = setInterval(() => {
-                if (streamClosed || firstUpstreamChunkAt !== null) return;
-                try {
-                  writeChunk(encoder.encode(': keep-alive\n\n'));
-                } catch (_err) {
-                  closeStream();
-                }
-              }, STREAM_HEARTBEAT_INTERVAL_MS) as unknown as number;
-
-              const upstreamResponse = await fetch(proxyRequest);
-              context.log(`[stream] upstream headers in ${Date.now() - requestStartAt}ms path=${path}`);
-
-              if (!upstreamResponse.ok) {
-                const upstreamErrorText = await upstreamResponse.text().catch(() => upstreamResponse.statusText);
-                emitSseError({
-                  source: 'upstream',
-                  status: upstreamResponse.status,
-                  message: upstreamErrorText.slice(0, 800),
-                });
-                return;
-              }
-
-              if (!upstreamResponse.body) {
-                emitSseError({
-                  source: 'proxy',
-                  message: 'upstream response body is empty',
-                });
-                return;
-              }
-
-              const upstreamContentType = (upstreamResponse.headers.get('content-type') || '').toLowerCase();
-              if (!upstreamContentType.includes(EVENT_STREAM_CONTENT_TYPE)) {
-                const preview = await upstreamResponse.text().catch(() => '');
-                emitSseError({
-                  source: 'upstream',
-                  message: 'unexpected content-type for streaming request',
-                  contentType: upstreamContentType || 'unknown',
-                  preview: preview.slice(0, 400),
-                });
-                return;
-              }
-
-              const reader = upstreamResponse.body.getReader();
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                if (!value || value.byteLength === 0) continue;
-
-                if (firstUpstreamChunkAt === null) {
-                  firstUpstreamChunkAt = Date.now();
-                  context.log(`[stream] first upstream chunk in ${firstUpstreamChunkAt - requestStartAt}ms path=${path}`);
-                }
-                writeChunk(value);
-              }
-
-              context.log(`[stream] completed in ${Date.now() - requestStartAt}ms path=${path}`);
-              closeStream();
-            } catch (error) {
-              context.log(`[stream] failed path=${path} error=${error}`);
-              emitSseError({
-                source: 'proxy',
-                message: 'streaming failed before completion',
-              });
-            }
-          }
-        });
-
-        context.log(`[stream] response started in ${Date.now() - requestStartAt}ms path=${path}`);
-        return new Response(stream, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Pragma': 'no-cache',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Range',
-          }
-        });
-      }
-
       // 发起代理请求
       const response = await fetch(proxyRequest);
 
       // 获取内容类型
       const contentType = response.headers.get('content-type') || '';
-      const streamingResponse = aiApiRequest && isStreamingResponse(response);
+      const streamingResponse = aiApiRequest && (isStreamingRequest(request) || isStreamingResponse(response));
 
       // 创建新的响应对象，以便我们可以修改头部
       let newResponse: Response;
