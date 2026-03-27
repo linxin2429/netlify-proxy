@@ -452,16 +452,28 @@ export default async (request: Request, context: Context) => {
           }
         }
 
+        const upstreamAbortController = new AbortController();
+        let heartbeatTimer: number | undefined;
+        let streamClosed = false;
+        let firstUpstreamChunkAt: number | null = null;
+        let heartbeatCount = 0;
+        let upstreamChunkCount = 0;
+        let upstreamBytes = 0;
+
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             const encoder = new TextEncoder();
-            const writeChunk = (chunk: Uint8Array) => controller.enqueue(chunk);
-            let heartbeatTimer: number | undefined;
-            let streamClosed = false;
-            let firstUpstreamChunkAt: number | null = null;
-            let heartbeatCount = 0;
-            let upstreamChunkCount = 0;
-            let upstreamBytes = 0;
+            const writeChunk = (chunk: Uint8Array): boolean => {
+              if (streamClosed) return false;
+              try {
+                controller.enqueue(chunk);
+                return true;
+              } catch (error) {
+                streamClosed = true;
+                log(`[stream] enqueue failed error=${error}`);
+                return false;
+              }
+            };
 
             const closeStream = () => {
               if (streamClosed) return;
@@ -469,7 +481,11 @@ export default async (request: Request, context: Context) => {
               if (heartbeatTimer !== undefined) {
                 clearInterval(heartbeatTimer);
               }
-              controller.close();
+              try {
+                controller.close();
+              } catch (error) {
+                log(`[stream] close ignored error=${error}`);
+              }
               log(`[stream] closed heartbeatCount=${heartbeatCount} chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
             };
 
@@ -491,7 +507,9 @@ export default async (request: Request, context: Context) => {
                 }
               }, STREAM_HEARTBEAT_INTERVAL_MS) as unknown as number;
 
-              const upstreamResponse = await fetch(streamProxyRequest);
+              const upstreamResponse = await fetch(streamProxyRequest, {
+                signal: upstreamAbortController.signal,
+              });
               log(`[stream] upstream headers in ${Date.now() - streamStartAt}ms status=${upstreamResponse.status} contentType=${upstreamResponse.headers.get('content-type') || ''}`);
 
               if (!upstreamResponse.ok) {
@@ -536,7 +554,11 @@ export default async (request: Request, context: Context) => {
                   firstUpstreamChunkAt = Date.now();
                   log(`[stream] first upstream chunk in ${firstUpstreamChunkAt - streamStartAt}ms`);
                 }
-                writeChunk(value);
+                if (!writeChunk(value)) {
+                  log('[stream] downstream closed while forwarding');
+                  upstreamAbortController.abort();
+                  return;
+                }
                 if (upstreamChunkCount % 25 === 0) {
                   log(`[stream] progress chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
                 }
@@ -545,13 +567,26 @@ export default async (request: Request, context: Context) => {
               log(`[stream] completed in ${Date.now() - streamStartAt}ms chunks=${upstreamChunkCount} bytes=${upstreamBytes}`);
               closeStream();
             } catch (error) {
+              if (streamClosed) {
+                log('[stream] catch ignored after stream closed');
+                return;
+              }
               log(`[stream] failed path=${path} error=${error}`);
               emitSseError({
                 source: 'proxy',
                 message: 'streaming failed before completion',
               });
             }
-          }
+          },
+          cancel(reason) {
+            if (streamClosed) return;
+            streamClosed = true;
+            if (heartbeatTimer !== undefined) {
+              clearInterval(heartbeatTimer);
+            }
+            upstreamAbortController.abort();
+            log(`[stream] canceled by downstream reason=${String(reason ?? 'unknown')}`);
+          },
         });
 
         log(`[stream] response started in ${Date.now() - streamStartAt}ms path=${path}`);
